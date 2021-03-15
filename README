@@ -1,0 +1,12 @@
+Hello!
+
+
+Instructions:
+1. run ./configure
+2. run make
+3. run ./osc_sharp
+4. connect the oscillator to your output device using jack
+5. use the mouse to control the frequency of the phasor 
+
+
+(The mouse position height and width percentage relative to your display size will modulate the frequency of phi_x and phi_y, respectively)
