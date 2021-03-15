@@ -20,6 +20,81 @@ static jack_port_t *port_out = NULL;
 static jack_nframes_t sr;
 
 
+/* ------------------perlin noise implementation -----------------*/
+
+//source: https://gist.github.com/nowl/828013
+//thank you to nowl on github.
+
+#include <stdio.h>
+
+static int SEED = 0;
+
+static int hash[] = {208,34,231,213,32,248,233,56,161,78,24,140,71,48,140,254,245,255,247,247,40,
+                     185,248,251,245,28,124,204,204,76,36,1,107,28,234,163,202,224,245,128,167,204,
+                     9,92,217,54,239,174,173,102,193,189,190,121,100,108,167,44,43,77,180,204,8,81,
+                     70,223,11,38,24,254,210,210,177,32,81,195,243,125,8,169,112,32,97,53,195,13,
+                     203,9,47,104,125,117,114,124,165,203,181,235,193,206,70,180,174,0,167,181,41,
+                     164,30,116,127,198,245,146,87,224,149,206,57,4,192,210,65,210,129,240,178,105,
+                     228,108,245,148,140,40,35,195,38,58,65,207,215,253,65,85,208,76,62,3,237,55,89,
+                     232,50,217,64,244,157,199,121,252,90,17,212,203,149,152,140,187,234,177,73,174,
+                     193,100,192,143,97,53,145,135,19,103,13,90,135,151,199,91,239,247,33,39,145,
+                     101,120,99,3,186,86,99,41,237,203,111,79,220,135,158,42,30,154,120,67,87,167,
+                     135,176,183,191,253,115,184,21,233,58,129,233,142,39,128,211,118,137,139,255,
+                     114,20,218,113,154,27,127,246,250,1,8,198,250,209,92,222,173,21,88,102,219};
+
+int noise2(int x, int y)
+{
+    int tmp = hash[(y + SEED) % 256];
+    return hash[(tmp + x) % 256];
+}
+
+float lin_inter(float x, float y, float s)
+{
+    return x + s * (y-x);
+}
+
+float smooth_inter(float x, float y, float s)
+{
+    return lin_inter(x, y, s * s * (3-2*s));
+}
+
+float noise2d(float x, float y)
+{
+    int x_int = x;
+    int y_int = y;
+    float x_frac = x - x_int;
+    float y_frac = y - y_int;
+    int s = noise2(x_int, y_int);
+    int t = noise2(x_int+1, y_int);
+    int u = noise2(x_int, y_int+1);
+    int v = noise2(x_int+1, y_int+1);
+    float low = smooth_inter(s, t, x_frac);
+    float high = smooth_inter(u, v, x_frac);
+    return smooth_inter(low, high, y_frac);
+}
+
+float perlin2d(float x, float y, float freq, int depth)
+{
+    float xa = x*freq;
+    float ya = y*freq;
+    float amp = 1.0;
+    float fin = 0;
+    float div = 0.0;
+
+    int i;
+    for(i=0; i<depth; i++)
+    {
+        div += 256 * amp;
+        fin += noise2d(xa, ya) * amp;
+        amp /= 2;
+        xa *= 2;
+        ya *= 2;
+    }
+
+    return fin/div;
+}
+
+
 /* ---------------- tbl ---------------- */
 
 #define TBL_SIZE 512
@@ -31,8 +106,8 @@ static float freq_y = 0;
 
 float wrapper(float x) {
   float ret = x;
-  while(ret >= 1) ret--;
-  while (ret < 0) ret++;
+  while(ret >= 1) ret-=2;
+  while (ret < -1) ret+=2;
   return ret;
 }
 
@@ -60,7 +135,9 @@ tbl_init(void) {
       y = map(j, 0.0f, TBL_SIZE, -1.0f, 1.0f);
 
       //float p = sin(x)*sin(y)*(x-y)*(x-1.0f)*(x+1.0f)*(y-1.0f)*(y+1.0f);
-      float p = sin(1.0f-x*x)*sin(1.0f-y*y)*(1.0f-y*y)*x;
+      //float p = sin(1.0f-x*x)*sin(1.0f-y*y)*(1.0f-y*y)*x;
+      float p = perlin2d(x, y, 0.1, 7)*(x-1)*(x+1)*(y-1)*(y+1);
+
       tbl[i][j] = p;
       //printf("%lu,%d is %f\nx and y are: %f, %f\n", i, j, p, x, y);
 
@@ -163,6 +240,27 @@ tbl_eval(float x, float y) {
 /* ---------------- /tbl ---------------- */
 
 
+/* ---------------- onproceess callback ---------------- */
+
+
+//frequency smoothing for freq_x and freq_y
+static float
+freq_tick_x(void) {
+  static float mem = 0;
+  mem = 0.001 * freq_x + 0.999 * mem;
+  return mem;
+}
+
+
+static float
+freq_tick_y(void) {
+  static float mem = 0;
+  mem = 0.001 * freq_y + 0.999 * mem;
+  return mem;
+}
+
+
+
 static int
 on_process(jack_nframes_t nframes, void *arg)
 {
@@ -184,15 +282,17 @@ on_process(jack_nframes_t nframes, void *arg)
   for (i = 0; i < nframes; ++i) {
 
 
-    phi_x += freq_x / sr;
+    //phi_x += freq_x / sr;
+    phi_x += freq_tick_x() / sr;
     phi_x = wrapper(phi_x);
 
-    phi_y += freq_y / sr;
+    //phi_y += freq_y / sr;
+    phi_y += freq_tick_y() / sr;
     phi_y = wrapper(phi_y);
 
     //x(phi) = 0.7cos(2*pi*phi + pi/3)
     //y(phi) = 0.35sin(8*pi*phi)
-    x = 0.7f*cos(2.0f*M_PI*phi_x + M_PI/0.3f);
+    x = 0.35f*cos(2.0f*M_PI*phi_x + M_PI/6.0f);
     y = 0.7f*sin(8.0*M_PI*phi_y);
     //x = phi_x*cos(2.0f*M_PI*0.9 + M_PI/0.3f);
     //y = phi_y*sin(8.0*M_PI*0.4);
@@ -207,11 +307,13 @@ on_process(jack_nframes_t nframes, void *arg)
 }
 
 
+/* ---------------- /onproceess callback ---------------- */
 
 
 
 
-/* ---------------- /setup ---------------- */
+
+/* ---------------- setup ---------------- */
 
 
 static void
@@ -220,7 +322,7 @@ jack_init(void)
   client = jack_client_open("sine", JackNoStartServer, NULL);
 
   sr = jack_get_sample_rate(client);
-  printf("sr is %d: ", sr);
+  //printf("sample rate of your jack server is: %d\n", sr);
 
   jack_set_process_callback(client, on_process, NULL);
 
@@ -237,6 +339,9 @@ jack_finish(void)
   jack_deactivate(client);
   jack_client_close(client);
 }
+
+
+/* ---------------- /setup ---------------- */
 
 
 
@@ -261,7 +366,7 @@ on_signal(int signum)
 
 
 
-/*------------------mouse setup ---------------------------*/
+/*------------------/mouse setup ---------------------------*/
 
 
 
@@ -270,26 +375,30 @@ int
 main(void)
 {
 
-  printf("\ngot here 1\n");
+
 
   jack_init();
-  printf("\ngot here 2\n");
+
   tbl_init();    /* <- must be called before activating client */
-  printf("\ngot here 3\n");
+
   jack_activate(client);
-  printf("\ngot here 4\n");
+
+
+  printf("Jack connection successful! Now, hook this oscillator up on the patchbay.\n");
+  
+
 
 
   /*--------mouse stuff-------------*/
 
-  printf("\ngot here 4.a\n");
+
 
   if( SDL_Init(SDL_INIT_VIDEO) < 0 ) {
     fprintf(stderr, "Couldn't initialize SDL: %s\n", SDL_GetError());
     exit(1);
   }
 
-  printf("\ngot here 5\n");
+
 
   int x = 0, y = 0, prev_x = 0, prev_y = 0;
 
@@ -305,8 +414,7 @@ main(void)
   MAX_X = r.w;
   MAX_Y = r.h;
 
-  printf("width/height: %d %d\n", MAX_Y, MAX_X);
-
+  //printf("width/height of your display: %d/%d\n", MAX_Y, MAX_X);
 
   if (SDL_Init(SDL_INIT_VIDEO) != 0)
     die("fail to init sdl");
@@ -314,7 +422,9 @@ main(void)
   /* catch signal for grace shutdown */
   signal(SIGINT, on_signal);
 
-  printf("\ngot here 6\n");
+  printf("Use the mouse to modulate the phase of the orbit. The position of the mouse relative to width and height of the display control the x phase and y phase, respectively.\n");
+
+  printf("\n");
 
   while (!done) {
     SDL_Event evt;
@@ -327,15 +437,16 @@ main(void)
       prev_x = x % MAX_X;
       prev_y = y % MAX_Y;
 
-      freq_y = map(prev_y, 0, MAX_Y, 0, 4000);
-      freq_x = map(prev_x, 0, MAX_X, 0, 4000);
+      freq_y = map(prev_y, 0, MAX_Y, 0, 220);
+      freq_x = map(prev_x, 0, MAX_X, 0, 440);
     }
   }
 
   SDL_Quit();
 
-printf("\ngot here 7\n");
-  /*--------mouse stuff-------------*/
+
+
+  /*-------- /mouse stuff-------------*/
 
 
   /* idle main thread */
